@@ -1,4 +1,4 @@
-const CACHE_NAME = 'fullbloom-v10';
+const CACHE_NAME = 'fullbloom-v11';
 const APP_SHELL = [
   './',
   './index.html',

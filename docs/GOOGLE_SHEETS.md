@@ -1,12 +1,26 @@
-# Captura en Google Sheets · Full Bloom v6
+# Captura y análisis en Google Sheets · Full Bloom
 
-1. Crea una Google Sheet con la pestaña `respuestas`.
+1. Crea o abre la Google Sheet que recibirá los datos.
 2. En **Extensiones → Apps Script**, pega [`Code.gs`](../google-apps-script/Code.gs).
 3. Despliega como **Aplicación web**, ejecutada como tú y accesible por cualquier persona.
 4. Copia la URL terminada en `/exec` en `CONFIG.sheetEndpoint`.
 
-La app envía checkpoints no bloqueantes con `no-cors` y `text/plain`. Cada `sessionId` anónimo actualiza su misma fila, por lo que una partida no se duplica al sincronizar varias veces.
+La app envía checkpoints acumulativos no bloqueantes con `no-cors` y `text/plain`. Si no hay red, conserva los eventos en el navegador y vuelve a intentarlo al recuperar la conexión.
 
-Columnas: `session_id`, `timestamp`, `equipo`, `idioma`, `inicio`, `competencias`, `prioridades`, `candidato`, `ranking`, `enfoque`, `descuidada`, `retos`, `timeouts`, `fin`.
+El receptor crea y mantiene:
 
-No se almacenan cuentas, perfiles ni datos personales. Si no hay red, el estado permanece en el navegador y se reintenta al volver la conexión.
+- `Eventos`: una fila por respuesta. Los identificadores únicos impiden duplicados durante reintentos.
+- `Sesiones`: una fila por `sessionId`, actualizada con los totales acumulados.
+- `Gaps`: cinco consultas automáticas para detección, primer intento, respuestas equivocadas, retos y onboarding.
+
+Las pestañas históricas `respuestas` e `interacciones` no se borran, pero este receptor ya no las actualiza.
+
+## Comprobación
+
+1. Abre la URL `/exec` y confirma la respuesta JSON `{ "ok": true }`.
+2. Completa una partida de prueba y verifica que aparecen datos en `Eventos` y `Sesiones`.
+3. Confirma que `Gaps` contiene los cinco bloques de análisis y que las tasas aparecen como porcentajes.
+
+Cada cambio en `Code.gs` requiere **Implementar → Gestionar implementaciones → Editar → Versión nueva**. La URL `/exec` se conserva.
+
+Solo se almacena el alias del equipo; no se solicitan nombres individuales ni cuentas personales.

@@ -1,128 +1,154 @@
-const SHEET_NAME = 'respuestas';
-const INTERACTIONS_SHEET_NAME = 'interacciones';
+/**
+ * FULL BLOOM · Receptor de eventos (Google Apps Script)
+ *
+ * Crea/usa tres pestañas:
+ *   - "Eventos": una fila por respuesta, incluidos los errores previos.
+ *   - "Sesiones": una fila actualizable por equipo.
+ *   - "Gaps": cinco análisis QUERY que se actualizan automáticamente.
+ *
+ * Los eventos son idempotentes: un mismo id nunca se escribe dos veces.
+ */
 
-const HEADERS = [
-  'session_id', 'timestamp', 'equipo', 'idioma', 'inicio',
-  'competencias_ids', 'prioridades_ids', 'candidato_id', 'ranking_ids', 'enfoque_ids',
-  'descuidada_id', 'retos_ids', 'timeouts', 'fin',
-  'candidato_nombre', 'candidato_perfil', 'competencias_legibles', 'prioridades_legibles',
-  'ranking_legible', 'enfoque_legible', 'descuidada_legible', 'retos_legibles',
-  'total_clicks', 'historial_clicks', 'duracion_segundos', 'resultado_completo_json',
+var EVENTS_SHEET = 'Eventos';
+var SESSIONS_SHEET = 'Sesiones';
+var GAPS_SHEET = 'Gaps';
+
+var EVENT_HEADERS = [
+  'id', 'fecha_hora', 'sesion', 'equipo', 'idioma',
+  'fase', 'item_id', 'item', 'intento', 'elegido',
+  'correcto', 'resultado', 'es_error'
 ];
-
-const INTERACTION_HEADERS = [
-  'session_id', 'equipo', 'secuencia', 'fecha_hora', 'segundos_desde_inicio',
-  'pantalla', 'accion', 'elemento_id', 'texto_visible', 'intencion',
+var SESSION_HEADERS = [
+  'sesion', 'equipo', 'idioma', 'inicio', 'fin',
+  'candidato', 'n_eventos', 'n_errores', 'ultima_actualizacion'
 ];
-
-function ensureSheet_(spreadsheet, name, headers) {
-  const sheet = spreadsheet.getSheetByName(name) || spreadsheet.insertSheet(name);
-  if (sheet.getMaxColumns() < headers.length) {
-    sheet.insertColumnsAfter(sheet.getMaxColumns(), headers.length - sheet.getMaxColumns());
-  }
-  sheet.getRange(1, 1, 1, headers.length).setValues([headers]).setFontWeight('bold');
-  sheet.setFrozenRows(1);
-  return sheet;
-}
-
-function list_(values) {
-  return (values || []).join(' | ');
-}
-
-function readableFocus_(values) {
-  return Object.entries(values || {})
-    .map(([dimension, actions]) => `${dimension}: ${(actions || []).join(' / ')}`)
-    .join('\n');
-}
-
-function readableChallenges_(retos) {
-  return (retos || []).map((item, index) => {
-    const decision = (item.eleccionTextos || []).join(' / ') || 'Sin respuesta';
-    return `${index + 1}. ${item.fortaleza || item.retoId} — ${item.reto || ''}: ${decision}`;
-  }).join('\n');
-}
-
-function readableClicks_(interactions) {
-  return (interactions || []).map((item) =>
-    `${item.sequence}. [${item.screenLabel || item.screen}] ${item.actionLabel || item.action}: ${item.text || item.targetId || ''} (${item.selection || 'acción'})`
-  ).join('\n');
-}
-
-function durationSeconds_(payload) {
-  if (!payload.startedAt || !payload.finishedAt) return '';
-  return Math.max(0, Math.round((new Date(payload.finishedAt) - new Date(payload.startedAt)) / 1000));
-}
-
-function responseRow_(payload) {
-  return [
-    payload.sessionId, new Date(), payload.alias || '', payload.lang || '', payload.startedAt || '',
-    list_(payload.seleccion?.elegidas), list_(payload.seleccion?.prioridades),
-    payload.seleccion?.candidato || '', list_(payload.onboarding?.ranking),
-    JSON.stringify(payload.onboarding?.enfoque || {}), payload.onboarding?.descuidada || '',
-    JSON.stringify((payload.retos || []).map((item) => ({ retoId: item.retoId, eleccion: item.eleccion || [] }))),
-    list_(payload.timeouts), payload.finishedAt || '',
-    payload.seleccion?.candidatoNombre || '', payload.seleccion?.candidatoPerfil || '',
-    list_(payload.seleccion?.elegidasLabels), list_(payload.seleccion?.prioridadesLabels),
-    list_(payload.onboarding?.rankingLabels), readableFocus_(payload.onboarding?.enfoqueLabels),
-    payload.onboarding?.descuidadaLabel || '', readableChallenges_(payload.retos),
-    (payload.interactions || []).length, readableClicks_(payload.interactions),
-    durationSeconds_(payload), JSON.stringify(payload),
-  ];
-}
-
-function upsertResponse_(sheet, payload) {
-  const row = responseRow_(payload);
-  const ids = sheet.getLastRow() > 1
-    ? sheet.getRange(2, 1, sheet.getLastRow() - 1, 1).getValues().flat()
-    : [];
-  const previous = ids.indexOf(payload.sessionId);
-  if (previous >= 0) sheet.getRange(previous + 2, 1, 1, row.length).setValues([row]);
-  else sheet.getRange(sheet.getLastRow() + 1, 1, 1, row.length).setValues([row]);
-}
-
-function interactionRow_(payload, item) {
-  return [
-    payload.sessionId, payload.alias || '', item.sequence || '', item.at || '',
-    item.elapsedSeconds ?? '', item.screenLabel || item.screen || '',
-    item.actionLabel || item.action || '', item.targetId || '', item.text || '', item.selection || '',
-  ];
-}
-
-function upsertInteractions_(sheet, payload) {
-  const interactions = payload.interactions || [];
-  if (!interactions.length) return;
-  const existing = sheet.getLastRow() > 1
-    ? sheet.getRange(2, 1, sheet.getLastRow() - 1, 3).getValues()
-    : [];
-  const rowsByKey = new Map(existing.map((row, index) => [`${row[0]}::${row[2]}`, index + 2]));
-  const newRows = [];
-  interactions.forEach((item) => {
-    const row = interactionRow_(payload, item);
-    const previousRow = rowsByKey.get(`${payload.sessionId}::${item.sequence}`);
-    if (previousRow) sheet.getRange(previousRow, 1, 1, row.length).setValues([row]);
-    else newRows.push(row);
-  });
-  if (newRows.length) {
-    sheet.getRange(sheet.getLastRow() + 1, 1, newRows.length, INTERACTION_HEADERS.length).setValues(newRows);
-  }
-}
 
 function doPost(e) {
-  if (!e?.postData?.contents) {
-    return ContentService.createTextOutput('Este método se prueba mediante una solicitud HTTP POST, no con el botón Ejecutar.');
-  }
-  const payload = JSON.parse(e.postData.contents);
-  if (!payload.sessionId) throw new Error('sessionId is required');
-  const lock = LockService.getScriptLock();
-  lock.waitLock(10000);
+  var lock = LockService.getScriptLock();
+  lock.waitLock(30000);
   try {
-    const spreadsheet = SpreadsheetApp.getActiveSpreadsheet();
-    const responsesSheet = ensureSheet_(spreadsheet, SHEET_NAME, HEADERS);
-    const interactionsSheet = ensureSheet_(spreadsheet, INTERACTIONS_SHEET_NAME, INTERACTION_HEADERS);
-    upsertResponse_(responsesSheet, payload);
-    upsertInteractions_(interactionsSheet, payload);
+    if (!e || !e.postData || !e.postData.contents) throw new Error('POST body is required');
+    var data = JSON.parse(e.postData.contents);
+    if (!data.sessionId) throw new Error('sessionId is required');
+
+    var ss = SpreadsheetApp.getActiveSpreadsheet();
+    writeEvents_(ss, data);
+    upsertSession_(ss, data);
+    ensureGaps_(ss);
+    SpreadsheetApp.flush();
+    return json_({ ok: true });
+  } catch (err) {
+    return json_({ ok: false, error: String(err) });
   } finally {
     lock.releaseLock();
   }
-  return ContentService.createTextOutput('ok');
+}
+
+// Prueba rápida: abre la URL terminada en /exec en el navegador.
+function doGet() {
+  return json_({ ok: true, service: 'FullBloom sink' });
+}
+
+function json_(obj) {
+  return ContentService
+    .createTextOutput(JSON.stringify(obj))
+    .setMimeType(ContentService.MimeType.JSON);
+}
+
+function sheet_(ss, name, headers) {
+  var sh = ss.getSheetByName(name) || ss.insertSheet(name);
+  if (sh.getMaxColumns() < headers.length) {
+    sh.insertColumnsAfter(sh.getMaxColumns(), headers.length - sh.getMaxColumns());
+  }
+  sh.getRange(1, 1, 1, headers.length).setValues([headers]).setFontWeight('bold');
+  sh.setFrozenRows(1);
+  return sh;
+}
+
+function writeEvents_(ss, data) {
+  var events = Array.isArray(data.events) ? data.events : [];
+  var sh = sheet_(ss, EVENTS_SHEET, EVENT_HEADERS);
+  if (!events.length) return;
+
+  var seen = {};
+  var last = sh.getLastRow();
+  if (last > 1) {
+    var ids = sh.getRange(2, 1, last - 1, 1).getValues();
+    for (var i = 0; i < ids.length; i++) seen[ids[i][0]] = true;
+  }
+
+  var rows = [];
+  for (var j = 0; j < events.length; j++) {
+    var ev = events[j];
+    if (!ev || !ev.id || seen[ev.id]) continue;
+    seen[ev.id] = true;
+    rows.push([
+      ev.id, ev.ts || '', ev.sessionId || data.sessionId, ev.equipo || data.alias || '', ev.idioma || data.lang || '',
+      ev.fase || '', ev.itemId || '', ev.item || '', ev.intento || '', ev.elegido || '',
+      ev.correcto || '', ev.resultado || 'n/a', ev.esError === true ? 1 : 0
+    ]);
+  }
+  if (rows.length) {
+    sh.getRange(sh.getLastRow() + 1, 1, rows.length, EVENT_HEADERS.length).setValues(rows);
+  }
+}
+
+function upsertSession_(ss, data) {
+  var sh = sheet_(ss, SESSIONS_SHEET, SESSION_HEADERS);
+  var events = Array.isArray(data.events) ? data.events : [];
+  var nErr = 0;
+  for (var i = 0; i < events.length; i++) {
+    if (events[i] && events[i].esError === true) nErr++;
+  }
+
+  var row = [
+    data.sessionId, data.alias || '', data.lang || '', data.startedAt || '', data.finishedAt || '',
+    (data.seleccion && data.seleccion.candidato) || '', events.length, nErr, new Date().toISOString()
+  ];
+
+  var target = 0;
+  var last = sh.getLastRow();
+  if (last > 1) {
+    var ids = sh.getRange(2, 1, last - 1, 1).getValues();
+    for (var k = 0; k < ids.length; k++) {
+      if (ids[k][0] === data.sessionId) {
+        target = k + 2;
+        break;
+      }
+    }
+  }
+  if (target) sh.getRange(target, 1, 1, SESSION_HEADERS.length).setValues([row]);
+  else sh.appendRow(row);
+}
+
+function ensureGaps_(ss) {
+  var sh = ss.getSheetByName(GAPS_SHEET) || ss.insertSheet(GAPS_SHEET);
+  if (sh.getMaxColumns() < 17) {
+    sh.insertColumnsAfter(sh.getMaxColumns(), 17 - sh.getMaxColumns());
+  }
+
+  var locale = String(ss.getSpreadsheetLocale() || '').toLowerCase();
+  var separator = /^(es|pt)(?:[_-]|$)/.test(locale) ? ';' : ',';
+  var formulas = [
+    '=QUERY(Eventos!A2:M' + separator + '"select H, count(A), avg(M) where F = \'deteccion\' group by H order by avg(M) desc label H \'Competencia\', count(A) \'Intentos\', avg(M) \'Tasa error\'")',
+    '=QUERY(Eventos!A2:M' + separator + '"select H, count(A) where F = \'deteccion\' and I = 1 and M = 1 group by H order by count(A) desc label H \'Competencia\', count(A) \'Fallos 1er intento\'")',
+    '=QUERY(Eventos!A2:M' + separator + '"select H, J, count(A) where F = \'deteccion\' and M = 1 group by H, J order by count(A) desc label H \'Competencia\', J \'Respuesta incorrecta elegida\', count(A) \'Veces\'")',
+    '=QUERY(Eventos!A2:M' + separator + '"select H, count(A), avg(M) where F = \'reto\' group by H order by avg(M) desc label H \'Reto\', count(A) \'Equipos\', avg(M) \'Tasa no óptima\'")',
+    '=QUERY(Eventos!A2:M' + separator + '"select H, count(A) where F = \'ob_enfoque\' and M = 1 group by H order by count(A) desc label H \'Dimensión\', count(A) \'Equipos que omitieron acciones\'")'
+  ];
+  var titles = [
+    'Detección · tasa de error',
+    'Detección · fallos en primer intento',
+    'Detección · respuestas equivocadas',
+    'Retos · decisiones no óptimas',
+    'Onboarding · acciones omitidas'
+  ];
+  var columns = [1, 5, 8, 12, 16];
+  for (var i = 0; i < columns.length; i++) {
+    sh.getRange(1, columns[i]).setValue(titles[i]).setFontWeight('bold');
+    sh.getRange(2, columns[i]).setFormula(formulas[i]);
+  }
+  sh.getRange(3, 3, Math.max(1, sh.getMaxRows() - 2), 1).setNumberFormat('0.0%');
+  sh.getRange(3, 14, Math.max(1, sh.getMaxRows() - 2), 1).setNumberFormat('0.0%');
+  sh.setFrozenRows(1);
 }

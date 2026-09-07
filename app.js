@@ -7,6 +7,8 @@
   let memory = null;
   let timerId = null;
   let renderedScreen = null;
+  let syncInFlight = false;
+  let syncVersion = 0;
 
   if ('scrollRestoration' in history) history.scrollRestoration = 'manual';
 
@@ -25,6 +27,7 @@
     timeouts: [],
     deliberation: {},
     interactions: [],
+    events: [],
     seleccion: {
       elegidas: [],
       prioridades: [],
@@ -64,6 +67,7 @@
 
   const loaded = load();
   let state = loaded || fresh();
+  if (!Array.isArray(state.events)) state.events = [];
   let showResume = Boolean(loaded && !loaded.finishedAt && loaded.screen !== 'lang');
 
   function save() {
@@ -250,6 +254,18 @@
       else state.seleccion.puzzleFeedback[id] = { kind: 'bad', text: `${content.ui.porQueNoMejor} ${item.why}` };
       if (!item.correct) state.seleccion.puzzleSelection[id] = [];
     }
+    const feedback = state.seleccion.puzzleFeedback[id];
+    const intento = state.events.filter((event) => event.fase === 'deteccion' && event.itemId === id).length + 1;
+    const resultado = feedback.kind === 'good' ? 'correcto' : feedback.kind === 'near' ? 'casi' : 'incorrecto';
+    logEvent('deteccion', {
+      itemId: id,
+      item: byId(content.POOL, id)?.name || id,
+      intento,
+      elegido: selected.map((index) => puzzle.options[Number(index)].t).join(' | '),
+      correcto: correct.map((index) => puzzle.options[Number(index)].t).join(' | '),
+      resultado,
+      esError: resultado !== 'correcto',
+    });
     save();
     render();
   }
@@ -458,6 +474,26 @@
     });
   }
 
+  function logEvent(fase, data = {}) {
+    if (!Array.isArray(state.events)) state.events = [];
+    state.events.push({
+      id: uuid(),
+      ts: new Date().toISOString(),
+      sessionId: state.sessionId,
+      equipo: state.alias,
+      idioma: state.lang,
+      fase,
+      itemId: data.itemId || '',
+      item: data.item || '',
+      intento: data.intento || '',
+      elegido: data.elegido || '',
+      correcto: data.correcto || '',
+      resultado: data.resultado || 'n/a',
+      esError: data.esError === true,
+    });
+    queueSync();
+  }
+
   function record() {
     const content = C();
     const poolLabel = (id) => byId(content.POOL, id)?.name || id;
@@ -506,18 +542,23 @@
       retos,
       interactions: state.interactions,
       timeouts: state.timeouts,
+      events: state.events,
     };
   }
 
   function queueSync() {
     if (!CONFIG.sheetEndpoint) return;
     state.pendingSync = true;
+    syncVersion += 1;
     save();
     syncToSheet();
   }
 
   async function syncToSheet() {
-    if (!CONFIG.sheetEndpoint || !state.pendingSync || !navigator.onLine) return;
+    if (!CONFIG.sheetEndpoint || !state.pendingSync || !navigator.onLine || syncInFlight) return;
+    const sendingVersion = syncVersion;
+    let sent = false;
+    syncInFlight = true;
     try {
       await fetch(CONFIG.sheetEndpoint, {
         method: 'POST',
@@ -525,12 +566,16 @@
         headers: { 'Content-Type': 'text/plain;charset=utf-8' },
         body: JSON.stringify(record()),
       });
-      state.pendingSync = false;
+      state.pendingSync = syncVersion !== sendingVersion;
       state.lastSyncAt = new Date().toISOString();
       save();
       render();
+      sent = true;
     } catch {
       save();
+    } finally {
+      syncInFlight = false;
+      if (sent && state.pendingSync && navigator.onLine) syncToSheet();
     }
   }
 
@@ -591,6 +636,12 @@
       save();
       render();
     } else if (action === 'req-next') {
+      const chosen = state.seleccion.elegidas.map((id) => byId(C().POOL, id)).filter(Boolean);
+      logEvent('competencias', {
+        elegido: chosen.map((item) => `${item.name}${item.dist ? ' (distractor)' : ''}`).join(' | '),
+        resultado: 'n/a',
+        esError: chosen.some((item) => item.dist),
+      });
       go('priorities');
     } else if (action === 'priority') {
       const id = button.dataset.id;
@@ -601,6 +652,10 @@
       save();
       render();
     } else if (action === 'prio-next') {
+      logEvent('prioridades', {
+        elegido: state.seleccion.prioridades.map((id) => byId(C().POOL, id)?.name || id).join(' | '),
+        resultado: 'n/a',
+      });
       state.seleccion.puzzleIndex = 0;
       startTimer('selB');
       go('puzzle');
@@ -627,6 +682,11 @@
       save();
       render();
     } else if (action === 'hire') {
+      logEvent('candidato', {
+        itemId: state.seleccion.candidato,
+        item: candidate()?.name || state.seleccion.candidato,
+        resultado: 'n/a',
+      });
       stopTimer();
       startTimer('onb');
       state.screen = 'obDiag';
@@ -644,6 +704,12 @@
       save();
       render();
     } else if (action === 'rank-next') {
+      const dimensions = state.onboarding.ranking.map((id) => byId(C().DIMENSIONS, id)?.label || id);
+      logEvent('ob_ranking', {
+        elegido: dimensions.join(' | '),
+        correcto: `descuidada: ${byId(C().DIMENSIONS, state.onboarding.ranking[3])?.label || ''}`,
+        resultado: 'n/a',
+      });
       state.onboarding.descuidada = state.onboarding.ranking[3];
       state.onboarding.focusIndex = 0;
       go('enfoque');
@@ -657,6 +723,21 @@
       save();
       render();
     } else if (action === 'focus-confirm') {
+      const dimension = currentDimension();
+      const selected = state.onboarding.enfoque[dimension.id] || [];
+      const candidateName = candidate()?.name || '';
+      const intentional = dimension.actions
+        .map((item, index) => ({ text: replace(item.t, { nombre: candidateName }), index: String(index), intentional: item.int }))
+        .filter((item) => item.intentional);
+      const missed = intentional.filter((item) => !selected.includes(item.index));
+      logEvent('ob_enfoque', {
+        itemId: dimension.id,
+        item: dimension.label,
+        elegido: intentional.filter((item) => selected.includes(item.index)).map((item) => item.text).join(' | '),
+        correcto: missed.map((item) => item.text).join(' | '),
+        resultado: missed.length === 0 ? 'correcto' : 'casi',
+        esError: missed.length > 0,
+      });
       state.onboarding.mirrorSeen[currentDimension().id] = true;
       save();
       render();
@@ -679,6 +760,24 @@
       save();
       render();
     } else if (action === 'challenge-confirm') {
+      const challenge = currentChallenge();
+      const selected = state.retos.choices[challenge.id] || [];
+      const chosen = selected.map((index) => challenge.item.options[Number(index)]).filter(Boolean);
+      const resultado = challenge.item.multi
+        ? chosen.length > 0 && chosen.every((item) => item.valid) ? 'correcto' : 'incorrecto'
+        : chosen[0]?.best ? 'correcto' : 'incorrecto';
+      logEvent('reto', {
+        itemId: challenge.id,
+        item: challenge.item.fortaleza,
+        intento: 1,
+        elegido: chosen.map((item) => replace(item.t, { nombre: candidate()?.name || '' })).join(' | '),
+        correcto: challenge.item.options
+          .filter((item) => item.best || item.valid)
+          .map((item) => replace(item.t, { nombre: candidate()?.name || '' }))
+          .join(' | '),
+        resultado,
+        esError: resultado !== 'correcto',
+      });
       state.retos.feedback[currentChallenge().id] = true;
       save();
       render();
