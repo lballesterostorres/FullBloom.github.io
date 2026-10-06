@@ -168,7 +168,7 @@
 
   function renderLang() {
     const { ui } = C();
-    app.innerHTML = `<div class="app-shell intro"><section class="screen intro-screen"><p class="brand large"><span>Full <i>Bloom</i></span></p><p class="tagline">${esc(ui.subtitle || CONFIG.subtitle)}</p><h1>${esc(ui.landing)}</h1><div class="language-actions"><button class="language-button" data-action="lang" data-lang="es">${esc(ui.langES)}</button><button class="language-button" data-action="lang" data-lang="pt">${esc(ui.langPT)}</button></div></section><footer class="welcome-credit">© 2026, <a href="https://danwar77.github.io/hologram-web/" target="_blank" rel="noopener noreferrer">Danwar77</a></footer></div>`;
+    app.innerHTML = `<div class="app-shell intro"><section class="screen intro-screen"><p class="brand large"><span>Full <i>Bloom</i></span></p><p class="tagline">${esc(ui.subtitle || CONFIG.subtitle)}</p><h1>${esc(ui.landing)}</h1><div class="language-actions"><button class="language-button" data-action="lang" data-lang="es">${esc(ui.langES)}</button><button class="language-button" data-action="lang" data-lang="pt">${esc(ui.langPT)}</button></div></section><footer class="welcome-credit">© 2026</footer></div>`;
   }
 
   function renderWelcome() {
